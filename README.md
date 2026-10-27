@@ -73,6 +73,7 @@ No deployment needed; copy the scripts to the PC that has the export.
 - Wick masts log only PP/PR, but all six channels are written.
 
 **Both**
+- Windows paths over 260 characters (deep OneDrive export folders) are handled by the extract script; `wick_quality_to_iredes.py` may still fail on them.
 - `wick_quality_to_iredes.py` still uses `os.path.relpath`, which fails on Windows if the database is on a different drive from the working directory. Run it from the same drive. (Fixed in the extract script, which falls back to absolute paths.)
 
 ## Data & privacy

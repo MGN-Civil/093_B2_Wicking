@@ -39,6 +39,17 @@ HOLE_COLS = ["id","item_id","time_start","time_end","start_x","start_y","start_z
              "note","completed","diameter","blast","IsOverridden"]
 
 # ----------------------------------------------------------------------------- read
+def long_path(path):
+    r"""On Windows, prefix with \\?\ so paths over 260 characters can be opened."""
+    if os.name != "nt":
+        return path
+    p = os.path.abspath(path)
+    if p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):                      # UNC share
+        return "\\\\?\\UNC\\" + p[2:]
+    return "\\\\?\\" + p
+
 def safe_relpath(path):
     """relpath, falling back to an absolute path when on a different Windows drive."""
     try:
@@ -51,14 +62,28 @@ def table_cols(cur, table):
 
 def read_db(path, since=None):
     """Return dict with holes, depth_log, layers lists of dicts, plus meta."""
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    tmpdir = None
+    open_path = path
+    if os.name == "nt" and len(os.path.abspath(path)) >= 250:
+        # SQLite can't open over-long Windows paths; read a short temporary copy instead
+        tmpdir = tempfile.mkdtemp()
+        open_path = os.path.join(tmpdir, "src.quality.db")
+        shutil.copyfile(long_path(path), open_path)
+    try:
+        return _read_db(path, open_path, since)
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+def _read_db(path, open_path, since):
+    con = sqlite3.connect(f"file:{open_path}?mode=ro", uri=True)
     cur = con.cursor()
     tables = {r[0] for r in cur.execute("select name from sqlite_master where type='table'")}
     meta = dict(cur.execute("select key,value from General").fetchall()) if "General" in tables else {}
     design = infer_design_name(path)
     src = safe_relpath(path)
     out = {"holes": [], "depth_log": [], "layers": [], "meta": meta, "design": design, "source": src,
-           "size": os.path.getsize(path), "mtime": datetime.datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds")}
+           "size": os.path.getsize(long_path(path)), "mtime": datetime.datetime.fromtimestamp(os.path.getmtime(long_path(path))).isoformat(timespec="seconds")}
     if "Hole" not in tables:
         return out
 
@@ -224,7 +249,7 @@ def _write_gpkg(path, holes, depth_log, layers, sources, srid):
 # ----------------------------------------------------------------------------- main
 def md5(path):
     h = hashlib.md5()
-    with open(path,"rb") as f:
+    with open(long_path(path),"rb") as f:
         for chunk in iter(lambda: f.read(1<<20), b""): h.update(chunk)
     return h.hexdigest()
 
@@ -259,14 +284,14 @@ def main():
     for p in a.folders:
         if os.path.isfile(p): dbs.append(p)
         else: dbs += glob.glob(os.path.join(p, "**", "*.quality.db"), recursive=True)
+    if a.design_filter:
+        dbs = [p for p in dbs if a.design_filter.lower() in infer_design_name(p).lower()]
     # dedupe identical files (the same db often appears twice in an export)
     seen, uniq = {}, []
     for p in sorted(dbs):
         k = md5(p)
         if (k, infer_design_name(p)) in seen: continue
         seen[(k, infer_design_name(p))] = p; uniq.append((p, k))
-    if a.design_filter:
-        uniq = [(p,k) for p,k in uniq if a.design_filter.lower() in infer_design_name(p).lower()]
     if not uniq:
         sys.exit("No *.quality.db files found")
 
