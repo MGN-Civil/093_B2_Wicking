@@ -50,7 +50,7 @@ A run that fails before it finds any data (e.g. no folder for that date) only ap
 - **Orphan check**: after copying, the `MWD` and `XML` delivery folders are compared by HoleId and any file without its partner is listed. The run ends with `No orphans.` or a warning with the number of items to check.
 - Both delivery folders must exist; nothing is copied if either is missing.
 - `--dry-run` lists what would be copied without copying. The batch file offers a dry run first and then asks before copying.
-- Each run is appended to `_from_Machine\<yyyymmdd>\wick_copy_xml.log`.
+- Each run, including every listed item and a one-line `SUMMARY:`, is appended to `_from_Machine\<yyyymmdd>\wick_copy_xml.log`.
 
 Defaults (`DEFAULT_ROOT`, `DEFAULT_XML` at the top of the script) can be changed with `--root` and `--xml`.
 
