@@ -20,6 +20,7 @@ Two Python scripts for getting as-drilled wick data out of Trimble Groundworks `
 - **`--since`** keeps holes with `time_end >=` the given ISO timestamp (text comparison, so use `YYYY-MM-DD`).
 - **`--design-filter`** keeps databases whose design name contains the text (case-insensitive).
 - **Extract**
+  - **Master mode** (`--master <dir>`) writes everything into `<dir>\<yyyymmdd>\`: the four CSVs, `<name>.gpkg` (default `wick_asdrilled`, change with `--name`) and `manifest.json` (run time, inputs, options, holes per design, latest `time_end`, row counts, source files). The date is today on the PC running it; `--date yyyymmdd` files an older export under its own date. Re-running on the same day overwrites that day's files. Give either `--master` or `-o`, not both.
   - `depth_m = start_z − end_z` (vertical depth, not along-hole length).
   - `--drop-zero-channels` removes depth-log channels that are zero for every record (wick masts log only PP/PR). Applied across all designs together.
   - Coordinates are copied as stored. `--srid` tags the GeoPackage with an EPSG code (default −1, undefined). Use the code for the coordinate system the design is in.
@@ -37,6 +38,12 @@ Trimble Groundworks `*.quality.db` SQLite files, passed as files or folders (fol
 ## Running
 
 ```bash
+# Daily run into a dated master folder -> D:\Wicking\Master\<yyyymmdd>\
+python wick_quality_extract.py "D:\WorksManager\Export" --master "D:\Wicking\Master" --design-filter WICK --drop-zero-channels
+
+# Back-file an older export under its own date
+python wick_quality_extract.py "D:\Exports\2026-10-19" --master "D:\Wicking\Master" --date 20261019 --design-filter WICK
+
 # CSV + GeoPackage, wick designs only, since 13 Oct, tagged MGA2020 zone 56
 python wick_quality_extract.py "D:\WorksManager\Export" -o out\b2_wicks --design-filter WICK --since 2026-10-13 --srid 7856 --drop-zero-channels
 
@@ -66,7 +73,7 @@ No deployment needed; copy the scripts to the PC that has the export.
 - Wick masts log only PP/PR, but all six channels are written.
 
 **Both**
-- `os.path.relpath` fails on Windows if the database is on a different drive from the working directory. Run from the same drive.
+- `wick_quality_to_iredes.py` still uses `os.path.relpath`, which fails on Windows if the database is on a different drive from the working directory. Run it from the same drive. (Fixed in the extract script, which falls back to absolute paths.)
 
 ## Data & privacy
 

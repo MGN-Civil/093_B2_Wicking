@@ -19,19 +19,33 @@ Usage
   python wick_quality_extract.py <folder> [<folder>...] -o <out_basename>
                                  [--csv] [--gpkg] [--srid 28356] [--design-filter "WICK"]
                                  [--skip-empty] [--since 2026-10-13]
+  python wick_quality_extract.py <folder> [<folder>...] --master <master_dir>
+                                 [--date yyyymmdd] [--name wick_asdrilled] [other options]
+
+Master mode (--master) writes everything into <master_dir>/<yyyymmdd>/:
+  holes.csv, depth_log.csv, layers.csv, sources.csv, <name>.gpkg, manifest.json
+The date defaults to today on the PC running the script; --date overrides it.
+Re-running on the same day overwrites that day's files.
 
 If neither --csv nor --gpkg is given, both are written.
 Coordinates are copied as stored (the design's local/site system unless the rig is
 configured to grid). Use --srid to tag the GeoPackage with an EPSG code (default -1 =
 undefined cartesian).
 """
-import argparse, csv, os, sqlite3, struct, sys, datetime, hashlib, glob, re, tempfile, shutil
+import argparse, csv, json, os, sqlite3, struct, sys, datetime, hashlib, glob, re, tempfile, shutil
 
 HOLE_COLS = ["id","item_id","time_start","time_end","start_x","start_y","start_z",
              "end_x","end_y","end_z","rotation","operator","machine","hrms","vrms",
              "note","completed","diameter","blast","IsOverridden"]
 
 # ----------------------------------------------------------------------------- read
+def safe_relpath(path):
+    """relpath, falling back to an absolute path when on a different Windows drive."""
+    try:
+        return os.path.relpath(path)
+    except ValueError:
+        return os.path.abspath(path)
+
 def table_cols(cur, table):
     return [r[1] for r in cur.execute(f'PRAGMA table_info("{table}")')]
 
@@ -42,7 +56,7 @@ def read_db(path, since=None):
     tables = {r[0] for r in cur.execute("select name from sqlite_master where type='table'")}
     meta = dict(cur.execute("select key,value from General").fetchall()) if "General" in tables else {}
     design = infer_design_name(path)
-    src = os.path.relpath(path)
+    src = safe_relpath(path)
     out = {"holes": [], "depth_log": [], "layers": [], "meta": meta, "design": design, "source": src,
            "size": os.path.getsize(path), "mtime": datetime.datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds")}
     if "Hole" not in tables:
@@ -132,6 +146,8 @@ def srs_wkt(srid):
         return f'PROJCS["EPSG:{srid}"]'  # placeholder; QGIS/GDAL resolve by organization_coordsys_id
 
 def write_gpkg(path, holes, depth_log, layers, sources, srid):
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
     tmpdir = tempfile.mkdtemp(); tmp = os.path.join(tmpdir, "out.gpkg")
     try:
         _write_gpkg(tmp, holes, depth_log, layers, sources, srid)
@@ -215,7 +231,11 @@ def md5(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folders", nargs="+", help="folder(s) or .quality.db file(s) to scan")
-    ap.add_argument("-o","--out", required=True, help="output basename (CSV dir / .gpkg path without extension)")
+    dest = ap.add_mutually_exclusive_group(required=True)
+    dest.add_argument("-o","--out", help="output basename (CSV dir / .gpkg path without extension)")
+    dest.add_argument("--master", help="master folder; outputs go to <master>/<yyyymmdd>/")
+    ap.add_argument("--date", help="yyyymmdd subfolder name for --master (default: today)")
+    ap.add_argument("--name", default="wick_asdrilled", help="GeoPackage base name in --master mode (default wick_asdrilled)")
     ap.add_argument("--csv", action="store_true"); ap.add_argument("--gpkg", action="store_true")
     ap.add_argument("--srid", type=int, default=-1, help="EPSG code for GeoPackage (default -1 undefined)")
     ap.add_argument("--design-filter", help="only databases whose design name contains this text (case-insensitive)")
@@ -224,6 +244,16 @@ def main():
     ap.add_argument("--drop-zero-channels", action="store_true", help="omit depth-log channels that are zero for every record (wick masts log only PP/PR)")
     a = ap.parse_args()
     if not a.csv and not a.gpkg: a.csv = a.gpkg = True
+    if a.master is None and (a.date or a.name != "wick_asdrilled"):
+        ap.error("--date and --name only apply with --master")
+    if a.master:
+        date = a.date or datetime.date.today().strftime("%Y%m%d")
+        try:
+            datetime.datetime.strptime(date, "%Y%m%d")
+        except ValueError:
+            ap.error(f"--date must be yyyymmdd, got {date!r}")
+        run_dir = os.path.join(a.master, date)
+        os.makedirs(run_dir, exist_ok=True)
 
     dbs = []
     for p in a.folders:
@@ -248,7 +278,7 @@ def main():
             sources.append({"source_db": r["source"], "design": r["design"], "creator": r["meta"].get("creator"),
                             "schema_version": r["meta"].get("version"), "size_bytes": r["size"], "modified": r["mtime"],
                             "holes": len(r["holes"]), "depth_records": len({d["record_id"] for d in r["depth_log"]}), "md5": k})
-        print(f"{r['design']:<20} {len(r['holes']):>6} holes  {os.path.relpath(p)}")
+        print(f"{r['design']:<20} {len(r['holes']):>6} holes  {safe_relpath(p)}")
 
     # de-dupe holes seen in more than one db (keep latest time_end)
     best = {}
@@ -262,8 +292,12 @@ def main():
         depth_log = [d for d in depth_log if d["channel"] in live]
         print(f"depth_log channels kept: {sorted(live)}")
 
+    written = {}
     if a.csv:
-        d = a.out if a.out.endswith(os.sep) else a.out + "_csv"
+        if a.master:
+            d = run_dir
+        else:
+            d = a.out if a.out.endswith(os.sep) else a.out + "_csv"
         os.makedirs(d, exist_ok=True)
         hole_fields = ["design","item_id","time_start","time_end","duration_s","start_x","start_y","start_z","end_x","end_y","end_z",
                        "depth_m","plan_offset_m","rotation","operator","machine","hrms","vrms","note","completed","diameter","blast","IsOverridden","source_db"]
@@ -272,10 +306,37 @@ def main():
         n3 = write_csv(layers, os.path.join(d,"layers.csv"), ["design","item_id","hole_id","name","z"])
         n4 = write_csv(sources, os.path.join(d,"sources.csv"))
         print(f"CSV  -> {d}  (holes {n1}, depth_log {n2}, layers {n3}, sources {n4})")
+        written["csv"] = {"holes.csv": n1, "depth_log.csv": n2, "layers.csv": n3, "sources.csv": n4}
     if a.gpkg:
-        g = a.out if a.out.endswith(".gpkg") else a.out + ".gpkg"
+        if a.master:
+            g = os.path.join(run_dir, a.name if a.name.endswith(".gpkg") else a.name + ".gpkg")
+        else:
+            g = a.out if a.out.endswith(".gpkg") else a.out + ".gpkg"
         write_gpkg(g, holes, depth_log, layers, sources, a.srid)
         print(f"GPKG -> {g}  (holes {len(holes)}, depth_log {len(depth_log)}, layers {len(layers)}, srid {a.srid})")
+        written["gpkg"] = os.path.basename(g)
+
+    if a.master:
+        per_design = {}
+        for h in holes:
+            per_design[h["design"]] = per_design.get(h["design"], 0) + 1
+        manifest = {
+            "run_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "folder_date": date,
+            "inputs": [os.path.abspath(p) for p in a.folders],
+            "options": {"csv": a.csv, "gpkg": a.gpkg, "srid": a.srid, "design_filter": a.design_filter,
+                        "since": a.since, "skip_empty": a.skip_empty, "drop_zero_channels": a.drop_zero_channels},
+            "holes_total": len(holes),
+            "holes_per_design": dict(sorted(per_design.items())),
+            "latest_time_end": max((h["time_end"] for h in holes if h.get("time_end")), default=None),
+            "rows": {"holes": len(holes), "depth_log": len(depth_log), "layers": len(layers), "sources": len(sources)},
+            "outputs": written,
+            "sources": sources,
+        }
+        mpath = os.path.join(run_dir, "manifest.json")
+        with open(mpath, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        print(f"MANIFEST -> {mpath}")
 
 if __name__ == "__main__":
     main()
