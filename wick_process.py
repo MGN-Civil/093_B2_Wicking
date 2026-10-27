@@ -10,6 +10,7 @@ and writes everything to one place:
       wick_asdrilled.gpkg      holes (PointZ collar), hole_axes (LineStringZ collar->toe),
                                depth_log, layers, sources
       manifest.json            what was read, options used, counts
+      wick_process.log         full output of every run for this date (appended)
       iredes\<design>\
           <HoleId>.quality.xml                DRPQual  (hole quality record)
           <design>.quality.<HoleId>.mwd.xml   DRMWD    (measure-while-drilling log)
@@ -39,9 +40,10 @@ Notes
     latest time_end. Identical database files are read once.
   * IREDES: Hstatus is "OK" when Hole.completed = 1, otherwise "Fail". ChkSum is a CRC32
     of the content before <IR:GenTrailer>, not Groundworks' own algorithm.
-  * Re-running for the same date rewrites that date's outputs.
+  * Re-running for the same date rewrites that date's outputs (the log is appended).
+  * Every run, including failed ones, adds one summary line to <root>\wick_process.log.
 """
-import argparse, csv, json, os, sqlite3, struct, sys, datetime, hashlib, glob, re, tempfile, shutil, zlib
+import argparse, csv, json, os, sqlite3, struct, sys, datetime, hashlib, glob, re, tempfile, shutil, zlib, traceback, time
 from xml.sax.saxutils import escape
 
 DEFAULT_ROOT = r"C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\_from_Machine"
@@ -272,6 +274,10 @@ UNITS = {"PR": ("m/min", "PenetrRate"), "DP": ("Bar", "DampPressure"), "PP": ("B
          "FP_FORWARD": ("Bar", "FeedPressureFwd"), "FP_BACK": ("Bar", "FeedPressureBack")}
 NAMED_PARAMS = 6   # Groundworks names the first six channels and leaves the rest as empty slots
 
+def fmt(x, dp=3):
+    """Number to fixed decimals; blank when the database holds NULL."""
+    return "" if x is None else f"{x:.{dp}f}"
+
 def ts(s):
     """'2026-10-13 09:30:18.2401552' -> '2026-10-13T09:30:18'"""
     return s[:19].replace(" ", "T")
@@ -341,19 +347,19 @@ def qual_xml(design, h, sysver, created):
     </Coordsystem>
   </PositionQuality>
   <DrillQuality>
-    <HoleQualityData firstname="{escape(h["operator"], {'"': '&quot;'})}" lastname="" machinename="{escape(h["machine"], {'"': '&quot;'})}" interruptedItem="{not completed}" HRMS="{h["hrms"]:.4f}" VRMS="{h["vrms"]:.4f}" IsOverridden="{over}">
+    <HoleQualityData firstname="{escape(h["operator"] or "", {'"': '&quot;'})}" lastname="" machinename="{escape(h["machine"] or "", {'"': '&quot;'})}" interruptedItem="{not completed}" HRMS="{fmt(h["hrms"], 4)}" VRMS="{fmt(h["vrms"], 4)}" IsOverridden="{over}">
       <Hole>
         <HoleId>{escape(h["item_id"])}</HoleId>
         <HoleName />
         <StartPoint>
-          <IR:PointX>{h["start_x"]:.3f}</IR:PointX>
-          <IR:PointY>{h["start_y"]:.3f}</IR:PointY>
-          <IR:PointZ>{h["start_z"]:.3f}</IR:PointZ>
+          <IR:PointX>{fmt(h["start_x"])}</IR:PointX>
+          <IR:PointY>{fmt(h["start_y"])}</IR:PointY>
+          <IR:PointZ>{fmt(h["start_z"])}</IR:PointZ>
         </StartPoint>
         <EndPoint>
-          <IR:PointX>{h["end_x"]:.3f}</IR:PointX>
-          <IR:PointY>{h["end_y"]:.3f}</IR:PointY>
-          <IR:PointZ>{h["end_z"]:.3f}</IR:PointZ>
+          <IR:PointX>{fmt(h["end_x"])}</IR:PointX>
+          <IR:PointY>{fmt(h["end_y"])}</IR:PointY>
+          <IR:PointZ>{fmt(h["end_z"])}</IR:PointZ>
         </EndPoint>
         <TypeOfHole>EasersHole</TypeOfHole>
         <DrillBitDia>{dia_mm}</DrillBitDia>
@@ -384,8 +390,8 @@ def mwd_xml(design, h, channels, samples, sysver, created):
             params.append("      <Parameter />")
     sample_lines = []
     for t, depth, vals in samples:
-        v = " ".join(f"{x:.3f}" for x in vals[:NAMED_PARAMS]) + " "
-        sample_lines.append(f'    <Samples TimeTag="{ts(t)}" DepthTag="{depth:.3f}">{v}</Samples>')
+        v = " ".join(fmt(x) for x in vals[:NAMED_PARAMS]) + " "
+        sample_lines.append(f'    <Samples TimeTag="{ts(t)}" DepthTag="{fmt(depth)}">{v}</Samples>')
     body = f"""<?xml  version = "1.0" encoding="utf-8"?>
 <DRMWD xmlns="http://www.iredes.org/xml/DrillRig" xmlns:IR="http://www.iredes.org/xml" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" schemaLocation="http://www.iredes.org/xml/DrillRig" IRVersion="V 1.0" IRDownwCompat="V 1.0" DRPPlanDownwCompat="V 1.0" DRPPlanVersion="V 1.0" DRMWDVersion="V 1.0">
 {head(sysver, created)}  <IR:ReportId>{ts(h["time_end"])}</IR:ReportId>
@@ -454,8 +460,15 @@ def valid_date(v):
     except ValueError:
         return False
 
+def find_dbs(folder):
+    """*.quality.db under folder, ignoring anything inside an outputs folder."""
+    return [d for d in glob.glob(os.path.join(glob.escape(folder), "**", "*.quality.db"), recursive=True)
+            if os.sep + "outputs" + os.sep not in d[len(folder):]]
+
 def input_folders(root, date):
-    return sorted(p for p in glob.glob(os.path.join(glob.escape(root), f"*{date}*")) if os.path.isdir(p))
+    """Folders directly under root whose name contains date and which hold at least one database."""
+    return sorted(p for p in glob.glob(os.path.join(glob.escape(root), f"*{date}*"))
+                  if os.path.isdir(p) and find_dbs(p))
 
 def ask_date(root):
     today = datetime.date.today().strftime("%Y%m%d")
@@ -466,11 +479,76 @@ def ask_date(root):
         if not valid_date(v):
             print("  Please enter a date as yyyymmdd, e.g. 20261027"); continue
         if not input_folders(root, v):
-            print(f"  No folder containing '{v}' in {root}")
-            recent = sorted({m.group(0) for p in os.listdir(root) for m in [re.search(r"20\d{6}", p)] if m and os.path.isdir(os.path.join(root, p))})[-5:]
+            print(f"  No folder containing '{v}' with *.quality.db files in {root}")
+            recent = sorted({m.group(0) for p in os.listdir(root) for m in [re.search(r"20\d{6}", p)] if m and os.path.isdir(os.path.join(root, p)) and find_dbs(os.path.join(root, p))})[-5:]
             if recent: print(f"  Dates available: {', '.join(recent)}")
             continue
         return v
+
+# ============================================================================ logging
+class Tee:
+    """Copy everything written to the console into a buffer for the log files."""
+    def __init__(self, stream, buf):
+        self.stream, self.buf = stream, buf
+    def write(self, s):
+        self.buf.append(s); return self.stream.write(s)
+    def flush(self):
+        self.stream.flush()
+    def isatty(self):
+        return self.stream.isatty()
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+RUN = {"root": DEFAULT_ROOT, "date": None, "out_dir": None, "summary": ""}
+
+def write_logs(buf, status, started, elapsed):
+    text = "".join(buf)
+    header = f"===== {started:%Y-%m-%d %H:%M:%S}  {status}  ({elapsed:.1f} s)  {' '.join(sys.argv[1:])}\n"
+    if RUN["out_dir"] and os.path.isdir(RUN["out_dir"]):
+        try:
+            with open(os.path.join(RUN["out_dir"], "wick_process.log"), "a", encoding="utf-8") as f:
+                f.write(header + text + ("" if text.endswith("\n") else "\n") + "\n")
+        except OSError as e:
+            print(f"(could not write run log: {e})", file=sys.__stdout__)
+    if os.path.isdir(RUN["root"]):
+        last_err = next((l.strip() for l in reversed(text.splitlines()) if l.strip()), "") if status != "OK" else ""
+        line = f"{started:%Y-%m-%d %H:%M:%S}\t{status}\tdate={RUN['date'] or '-'}\t{RUN['summary'] or last_err}\t{getpass_user()}\n"
+        try:
+            with open(os.path.join(RUN["root"], "wick_process.log"), "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError as e:
+            print(f"(could not write history log: {e})", file=sys.__stdout__)
+
+def getpass_user():
+    try:
+        import getpass; return getpass.getuser()
+    except Exception:
+        return ""
+
+def run():
+    buf = []
+    started, t0 = datetime.datetime.now(), time.time()
+    sys.stdout, sys.stderr = Tee(sys.__stdout__, buf), Tee(sys.__stderr__, buf)
+    status, code = "OK", 0
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            status, code = "FAILED", 1
+            if isinstance(e.code, str):
+                print(e.code)
+            else:
+                code = e.code
+    except KeyboardInterrupt:
+        status, code = "CANCELLED", 1
+        print("Cancelled.")
+    except Exception:
+        status, code = "FAILED", 1
+        traceback.print_exc()
+    finally:
+        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+        write_logs(buf, status, started, time.time() - t0)
+    sys.exit(code)
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -484,17 +562,21 @@ def main():
     ap.add_argument("--sysver", default="2.0.23201.521", help="EqpSysVer stamped in IREDES headers")
     ap.add_argument("--name", default="wick_asdrilled", help="GeoPackage base name (default wick_asdrilled)")
     a = ap.parse_args()
+    RUN["root"] = a.root
     if not os.path.isdir(a.root):
         sys.exit(f"Raw-data folder not found: {a.root}")
 
     date = a.date or ask_date(a.root)
+    RUN["date"] = date
     if not valid_date(date):
         ap.error(f"--date must be yyyymmdd, got {date!r}")
     inputs = input_folders(a.root, date)
     if not inputs:
-        sys.exit(f"No folder containing '{date}' in {a.root}")
+        sys.exit(f"No folder containing '{date}' with *.quality.db files in {a.root}")
     design_filter = None if a.all_designs else a.design_filter
     out_dir = os.path.join(a.root, date, "outputs")
+    RUN["out_dir"] = out_dir
+    print(f"Date     : {date}")
     ired_dir = os.path.join(out_dir, "iredes")
     print(f"Raw data : {', '.join(os.path.basename(p) for p in inputs)}")
     print(f"Designs  : {'all' if not design_filter else 'containing ' + repr(design_filter)}")
@@ -503,8 +585,7 @@ def main():
     # find databases (skip anything inside an outputs folder)
     dbs = []
     for p in inputs:
-        dbs += [d for d in glob.glob(os.path.join(glob.escape(p), "**", "*.quality.db"), recursive=True)
-                if os.sep + "outputs" + os.sep not in d]
+        dbs += find_dbs(p)
     if design_filter:
         dbs = [p for p in dbs if design_filter.lower() in infer_design_name(p).lower()]
     seen, uniq = set(), []
@@ -587,6 +668,8 @@ def main():
     print(f"\n  {len(holes)} holes  ({', '.join(f'{k}: {v}' for k, v in sorted(per_design.items()))})")
     print(f"  CSV + {os.path.basename(gpkg)} + manifest.json -> {out_dir}")
     print(f"  IREDES {n_ired * 2} files -> {ired_dir}")
+    print(f"  Log    -> {os.path.join(out_dir, 'wick_process.log')}")
+    RUN["summary"] = f"{len(holes)} holes, {n_ired * 2} IREDES files, from {', '.join(os.path.basename(p) for p in inputs)}"
 
 if __name__ == "__main__":
-    main()
+    run()

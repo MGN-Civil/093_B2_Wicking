@@ -18,6 +18,7 @@ _from_Machine\
       holes.csv  depth_log.csv  layers.csv  sources.csv
       wick_asdrilled.gpkg        holes (PointZ collar), hole_axes (LineStringZ), depth_log, layers, sources
       manifest.json              inputs, options, holes per design, latest time_end, counts
+      wick_process.log           full output of every run for this date (appended)
       iredes\
         B1 WICK D v3\
           <HoleId>.quality.xml               DRPQual
@@ -25,6 +26,13 @@ _from_Machine\
 ```
 
 Running the same date again rewrites that date's outputs.
+
+## Logs
+
+- `_from_Machine\<yyyymmdd>\outputs\wick_process.log` – everything the run printed (files read, hole counts, output paths) and the full error if it failed. Each run is appended under a `=====` header with time, result and duration.
+- `_from_Machine\wick_process.log` – one tab-separated line per run, for every date, including failed runs: time, `OK`/`FAILED`/`CANCELLED`, date, a summary (holes, IREDES files, source folders) or the error, and the Windows user.
+
+A run that fails before it finds any data (e.g. no folder for that date) only appears in the history log.
 
 ## Options
 
@@ -66,7 +74,7 @@ Double-click `git_pull.bat` in the scripts folder to get the latest version from
 
 ## Known issues
 
-- IREDES writing crashes on NULL `operator`, `machine`, `hrms`, `vrms`, coordinates or depth-log values.
+- NULL `operator`, `machine`, `hrms`, `vrms` or depth-log values are written as blanks in IREDES. NULL coordinates still stop the run (the error is in the log).
 - IREDES files always list all six channels even though wick masts log only PP/PR.
 - Empty CSVs are written with no header row.
 - The GeoPackage has no spatial index or `gpkg_extensions` table; fine for QGIS, slow for very large sets.
