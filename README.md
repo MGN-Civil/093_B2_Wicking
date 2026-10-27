@@ -25,6 +25,7 @@ Two Python scripts for getting as-drilled wick data out of Trimble Groundworks `
   - `--drop-zero-channels` removes depth-log channels that are zero for every record (wick masts log only PP/PR). Applied across all designs together.
   - Coordinates are copied as stored. `--srid` tags the GeoPackage with an EPSG code (default −1, undefined). Use the code for the coordinate system the design is in.
 - **IREDES**
+  - Output goes to `<master>\<yyyymmdd>\iredes\`. `--master` defaults to `C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\Scripts\out` (`DEFAULT_MASTER` at the top of the script). The script asks for the `yyyymmdd` folder name (Enter = today) unless `--date` is given; when run unattended (no console input) it uses today. `-o <dir>` writes straight to that folder instead.
   - `Hstatus` = `OK` when `Hole.completed = 1`, otherwise `Fail`; `interruptedItem` is the inverse.
   - Channel units: PR m/min; DP, PP, FP, RP, FLP Bar.
   - Fixed values: identity transform matrix, `CsysType L`, `TypeOfHole EasersHole`, `DrillingMethod: COPROD`, `SampleDistance 1.0`, `EqpSysVer` from `--sysver` (default `2.0.23201.521`).
@@ -50,8 +51,11 @@ python wick_quality_extract.py "D:\WorksManager\Export" -o out\b2_wicks --design
 # CSV only
 python wick_quality_extract.py "D:\WorksManager\Export" -o out\b2_wicks --csv
 
-# IREDES XML, incremental (re-runs only add new holes)
-python wick_quality_to_iredes.py "D:\WorksManager\Export" -o out\iredes --design-filter WICK
+# IREDES XML into Scripts\out\<yyyymmdd>\iredes\ (prompts for the date; re-runs only add new holes)
+python wick_quality_to_iredes.py "D:\WorksManager\Export" --design-filter WICK
+
+# Same, without the prompt
+python wick_quality_to_iredes.py "D:\WorksManager\Export" --design-filter WICK --date 20261027
 
 # Rebuild specific holes
 python wick_quality_to_iredes.py "D:\WorksManager\Export" -o out\iredes --hole 3B2740 3B2741 --overwrite
@@ -73,8 +77,7 @@ No deployment needed; copy the scripts to the PC that has the export.
 - Wick masts log only PP/PR, but all six channels are written.
 
 **Both**
-- Windows paths over 260 characters (deep OneDrive export folders) are handled by the extract script; `wick_quality_to_iredes.py` may still fail on them.
-- `wick_quality_to_iredes.py` still uses `os.path.relpath`, which fails on Windows if the database is on a different drive from the working directory. Run it from the same drive. (Fixed in the extract script, which falls back to absolute paths.)
+- Windows paths over 260 characters (deep OneDrive export folders) and databases on a different drive from the working directory are handled by both scripts.
 
 ## Data & privacy
 

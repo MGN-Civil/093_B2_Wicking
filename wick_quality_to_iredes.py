@@ -9,9 +9,15 @@ itself produces:
   <out>/<design>/<design>.quality.<HoleId>.mwd.xml    DRMWD    (measure-while-drilling log)
 
 Usage
-  python wick_quality_to_iredes.py <folder|db> [...] -o <out_dir>
+  python wick_quality_to_iredes.py <folder|db> [...]
+        [--master <dir>] [--date yyyymmdd] | [-o <out_dir>]
         [--design-filter WICK] [--hole 3B2740 ...] [--since 2026-10-13]
         [--flat] [--overwrite] [--sysver 2.0.23201.521]
+
+  Output goes to <master>/<yyyymmdd>/iredes/ unless -o is given.
+  --master      master folder (default: the 093 B2 Paddock Scripts/out folder, see DEFAULT_MASTER)
+  --date        yyyymmdd folder name; if omitted you are prompted (Enter = today)
+  -o            write to this folder instead, ignoring --master/--date
 
   --flat        write all files into <out_dir> without the per-design subfolder
   --overwrite   rewrite files that already exist (default: skip, so re-runs are incremental)
@@ -24,8 +30,10 @@ Notes
   * ChkSum is a CRC32 of the file content preceding <IR:GenTrailer>. Groundworks' exact
     algorithm is undocumented; consumers rarely validate it.
 """
-import argparse, os, sqlite3, glob, re, sys, zlib, datetime
+import argparse, os, sqlite3, glob, re, sys, zlib, datetime, tempfile, shutil
 from xml.sax.saxutils import escape
+
+DEFAULT_MASTER = r"C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\Scripts\out"
 
 UNITS = {"PR": ("m/min", "PenetrRate"), "DP": ("Bar", "DampPressure"), "PP": ("Bar", "PercPressure"),
          "FP": ("Bar", "FeedPressure"), "RP": ("Bar", "RotPressure"), "FLP": ("Bar", "FlushPressure"),
@@ -169,6 +177,34 @@ def mwd_xml(design, h, channels, samples, sysver, created):
 """
     return finish(body, created, "DRMWD")
 
+def long_path(path):
+    r"""On Windows, prefix with \\?\ so paths over 260 characters can be opened."""
+    if os.name != "nt":
+        return path
+    p = os.path.abspath(path)
+    if p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + p[2:]
+    return "\\\\?\\" + p
+
+def safe_relpath(path):
+    try:
+        return os.path.relpath(path)
+    except ValueError:                     # different Windows drive
+        return os.path.abspath(path)
+
+def ask_date():
+    today = datetime.date.today().strftime("%Y%m%d")
+    if not sys.stdin.isatty():
+        return today
+    while True:
+        v = input(f"Folder name (yyyymmdd) [{today}]: ").strip() or today
+        try:
+            datetime.datetime.strptime(v, "%Y%m%d"); return v
+        except ValueError:
+            print("  Please enter a date as yyyymmdd, e.g. 20261027")
+
 def safe(name):
     return re.sub(r'[\\/:*?"<>|]', "_", name)
 
@@ -176,7 +212,21 @@ def process_db(path, a, stats):
     design = infer_design_name(path)
     if a.design_filter and a.design_filter.lower() not in design.lower():
         return
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True); con.row_factory = sqlite3.Row
+    tmpdir = None
+    open_path = path
+    if os.name == "nt" and len(os.path.abspath(path)) >= 250:
+        # SQLite can't open over-long Windows paths; read a short temporary copy instead
+        tmpdir = tempfile.mkdtemp()
+        open_path = os.path.join(tmpdir, "src.quality.db")
+        shutil.copyfile(long_path(path), open_path)
+    try:
+        _process_db(path, open_path, design, a, stats)
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+def _process_db(path, open_path, design, a, stats):
+    con = sqlite3.connect(f"file:{open_path}?mode=ro", uri=True); con.row_factory = sqlite3.Row
     cur = con.cursor()
     tables = {r[0] for r in cur.execute("select name from sqlite_master where type='table'")}
     if "Hole" not in tables:
@@ -188,7 +238,7 @@ def process_db(path, a, stats):
     if conds: q += " where " + " and ".join(conds)
     holes = [dict(r) for r in cur.execute(q + " order by time_start", p)]
     if not holes:
-        print(f"{design:<20} 0 holes (after filters)  {os.path.relpath(path)}"); return
+        print(f"{design:<20} 0 holes (after filters)  {safe_relpath(path)}"); return
 
     chan_by_item = {r[0]: r[1].split(",") for r in cur.execute("select item_id, columns from Hole_DepthRecording")} if "Hole_DepthRecording" in tables else {}
     recs, vals = {}, {}
@@ -200,19 +250,19 @@ def process_db(path, a, stats):
     con.close()
 
     outdir = a.out if a.flat else os.path.join(a.out, safe(design))
-    os.makedirs(outdir, exist_ok=True)
+    os.makedirs(long_path(outdir), exist_ok=True)
     created = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     n_new = n_skip = 0
     for h in holes:
         hid = safe(h["item_id"])
         f_q = os.path.join(outdir, f"{hid}.quality.xml")
         f_m = os.path.join(outdir, f"{safe(design)}.quality.{hid}.mwd.xml")
-        if not a.overwrite and os.path.exists(f_q) and os.path.exists(f_m):
+        if not a.overwrite and os.path.exists(long_path(f_q)) and os.path.exists(long_path(f_m)):
             n_skip += 1; continue
         channels = chan_by_item.get(h["item_id"], ["PR","DP","PP","FP","RP","FLP","FP_FORWARD","FP_BACK"])
         samples = [(t, d, vals.get(rid, [])) for rid, t, d in recs.get(h["id"], [])]
-        with open(f_q, "w", encoding="utf-8", newline="\n") as f: f.write(qual_xml(design, h, a.sysver, created))
-        with open(f_m, "w", encoding="utf-8", newline="\n") as f: f.write(mwd_xml(design, h, channels, samples, a.sysver, created))
+        with open(long_path(f_q), "w", encoding="utf-8", newline="\n") as f: f.write(qual_xml(design, h, a.sysver, created))
+        with open(long_path(f_m), "w", encoding="utf-8", newline="\n") as f: f.write(mwd_xml(design, h, channels, samples, a.sysver, created))
         n_new += 1
     stats["written"] += n_new; stats["skipped"] += n_skip
     print(f"{design:<20} {len(holes):>5} holes  wrote {n_new:>5}  skipped {n_skip:>5}  -> {outdir}")
@@ -220,16 +270,28 @@ def process_db(path, a, stats):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("inputs", nargs="+", help="folder(s) to scan or .quality.db file(s)")
-    ap.add_argument("-o", "--out", required=True, help="output directory")
+    ap.add_argument("--master", default=DEFAULT_MASTER, help="master folder; output goes to <master>/<yyyymmdd>/iredes/")
+    ap.add_argument("--date", help="yyyymmdd folder name (prompted for if omitted)")
+    ap.add_argument("-o", "--out", help="write here instead of <master>/<yyyymmdd>/iredes/")
     ap.add_argument("--design-filter"); ap.add_argument("--hole", nargs="*", help="only these HoleIds")
     ap.add_argument("--since", help="only holes with time_end >= ISO timestamp")
     ap.add_argument("--flat", action="store_true"); ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--sysver", default="2.0.23201.521", help="EqpSysVer to stamp in the header")
     a = ap.parse_args()
+    if a.out and a.date:
+        ap.error("--date only applies when -o is not given")
     dbs = []
     for p in a.inputs:
         dbs += [p] if os.path.isfile(p) else glob.glob(os.path.join(p, "**", "*.quality.db"), recursive=True)
     if not dbs: sys.exit("No *.quality.db files found")
+    if not a.out:
+        date = a.date or ask_date()
+        try:
+            datetime.datetime.strptime(date, "%Y%m%d")
+        except ValueError:
+            ap.error(f"--date must be yyyymmdd, got {date!r}")
+        a.out = os.path.join(a.master, date, "iredes")
+    print(f"Output: {a.out}")
     stats = {"written": 0, "skipped": 0}
     for p in sorted(set(dbs)):
         process_db(p, a, stats)
