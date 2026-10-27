@@ -1,6 +1,6 @@
 # 093 B2 Wicking – Groundworks quality.db processing
 
-One Python script, `wick_process.py`, turns a day's Trimble Groundworks `*.quality.db` files (a WorksManager export) into everything needed for project 093 B2 Wicking: CSVs and a GeoPackage for Excel/QGIS, plus the per-hole IREDES XML files Groundworks itself exports. `run_wick.bat` runs it with a double-click. Runs on any PC with Python 3.8+; no extra packages.
+One Python script, `wick_process.py`, turns a day's Trimble Groundworks `*.quality.db` files (a WorksManager export) into everything needed for project 093 B2 Wicking: CSVs and a GeoPackage for Excel/QGIS, plus the per-hole IREDES XML files Groundworks itself exports, which it then copies into the XML delivery folders. `run_wick.bat` runs it with a double-click. Runs on any PC with Python 3.8+; no extra packages.
 
 ## Daily use
 
@@ -25,18 +25,20 @@ _from_Machine\
           B1 WICK D v3.quality.<HoleId>.mwd.xml  DRMWD
 ```
 
-Running the same date again rewrites that date's outputs.
+New IREDES files are then copied to the delivery folders (see below). Running the same date again rewrites that date's outputs; holes already delivered are not copied again.
+
+At the end the batch file shows **Finished**, **Finished WITH WARNINGS** (something needs checking, e.g. an orphan) or **Processing FAILED**.
 
 ## Logs
 
 - `_from_Machine\<yyyymmdd>\wick_process.log` – everything the run printed (files read, hole counts, output paths) and the full error if it failed. Each run is appended under a `=====` header with time, result and duration.
-- `_from_Machine\wick_process.log` – one tab-separated line per run, for every date, including failed runs: time, `OK`/`FAILED`/`CANCELLED`, date, a summary (holes, IREDES files, source folders) or the error, and the Windows user.
+- `_from_Machine\wick_process.log` – one tab-separated line per run, for every date, including failed runs: time, `OK`/`FAILED`/`CANCELLED`, date, a summary (holes, IREDES files, source folders, copy counts) or the error, and the Windows user. `OK-WARNINGS(n)` means it ran but n items need checking.
 
 A run that fails before it finds any data (e.g. no folder for that date) only appears in the history log.
 
-## Copying XML to the delivery folders (testing)
+## Copy to the XML delivery folders
 
-`wick_copy_xml.py` (double-click `run_copy_xml.bat`) copies a date's IREDES files from `_from_Machine\<yyyymmdd>\outputs\iredes\` into the delivery folders, without the design subfolders:
+The last step copies the day's IREDES files from `outputs\iredes\` into the delivery folders, without the design subfolders:
 
 | Files | Copied to |
 |---|---|
@@ -47,12 +49,8 @@ A run that fails before it finds any data (e.g. no folder for that date) only ap
 - A hole is **skipped** if both files are anywhere in the folders' `_archive` (subfolders included, case-insensitive), so already-delivered holes are not sent again.
 - **Not copied, and listed** for checking: a hole with only one of the two files in the day's output (source orphan); a hole with only one of the two in `_archive`; the same file name coming from two designs.
 - A file already in the delivery folder is left alone if identical. If it differs it is listed and not replaced unless `--overwrite` is given.
-- **Orphan check**: after copying, the `MWD` and `XML` delivery folders are compared by HoleId and any file without its partner is listed. The run ends with `No orphans.` or a warning with the number of items to check.
-- Both delivery folders must exist; nothing is copied if either is missing.
-- `--dry-run` lists what would be copied without copying. The batch file offers a dry run first and then asks before copying.
-- Each run, including every listed item and a one-line `SUMMARY:`, is appended to `_from_Machine\<yyyymmdd>\wick_copy_xml.log`.
-
-Defaults (`DEFAULT_ROOT`, `DEFAULT_XML` at the top of the script) can be changed with `--root` and `--xml`.
+- **Orphan check**: after copying, the `MWD` and `XML` delivery folders are compared by HoleId and any file without its partner is listed. The copy section ends with `No orphans.` or a warning with the number of items to check.
+- Both delivery folders must exist, checked before anything is processed. Use `--no-copy` to run without them.
 
 ## Options
 
@@ -69,6 +67,10 @@ Pass them after the batch file or script, e.g. `run_wick.bat --all-designs`.
 | `--srid <EPSG>` | −1 | Tag the GeoPackage with a coordinate system. Coordinates are the design's local site system, so leave at −1 unless the rig writes grid coordinates. |
 | `--sysver` | `2.0.23201.521` | `EqpSysVer` in IREDES headers. |
 | `--name` | `wick_asdrilled` | GeoPackage file name. |
+| `--xml <folder>` | `C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\XML` | Delivery folder holding `MWD\` and `XML\` (`DEFAULT_XML`). |
+| `--copy-dry-run` | off | List what would be copied to the delivery folders; copy nothing. |
+| `--no-copy` | off | Skip the copy step. |
+| `--overwrite` | off | Replace delivery-folder files that differ from today's. |
 
 ## How it works / business rules
 

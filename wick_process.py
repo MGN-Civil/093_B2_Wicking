@@ -16,6 +16,12 @@ and writes everything to one place:
           <HoleId>.quality.xml                DRPQual  (hole quality record)
           <design>.quality.<HoleId>.mwd.xml   DRMWD    (measure-while-drilling log)
 
+Finally the IREDES files are copied to the XML delivery folders, a hole's two files
+together or not at all:
+  <xml>\MWD\   *.mwd.xml        <xml>\XML\   *.quality.xml
+Holes already in each folder's _archive are skipped; orphans (a hole with only one of its
+two files) in the day's output, in _archive or in the delivery folders are listed.
+
 Raw data for a date is every folder directly under <root> whose name contains the date,
 e.g. "20261027" or "Export.20261027_111309". All matching folders are searched
 recursively for *.quality.db and merged.
@@ -34,6 +40,10 @@ Options
   --keep-zero-channels  keep depth-log channels that are zero throughout (dropped by default)
   --srid           EPSG code to tag the GeoPackage with (default -1 = undefined local grid)
   --sysver         EqpSysVer stamped in IREDES headers (default 2.0.23201.521)
+  --xml            XML delivery folder holding MWD\ and XML\ (default DEFAULT_XML below)
+  --no-copy        skip the copy to the delivery folders
+  --copy-dry-run   list what would be copied, copy nothing
+  --overwrite      replace delivery-folder files that differ from today's
 
 Notes
   * Coordinates are copied as stored (the design's local site system).
@@ -44,10 +54,11 @@ Notes
   * Re-running for the same date rewrites that date's outputs (the log is appended).
   * Every run, including failed ones, adds one summary line to <root>\wick_process.log.
 """
-import argparse, csv, json, os, sqlite3, struct, sys, datetime, hashlib, glob, re, tempfile, shutil, zlib, traceback, time
+import argparse, csv, filecmp, json, os, sqlite3, struct, sys, datetime, hashlib, glob, re, tempfile, shutil, zlib, traceback, time
 from xml.sax.saxutils import escape
 
 DEFAULT_ROOT = r"C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\_from_Machine"
+DEFAULT_XML = r"C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\XML"
 
 # ============================================================================ extract (CSV / GeoPackage)
 HOLE_COLS = ["id","item_id","time_start","time_end","start_x","start_y","start_z",
@@ -457,6 +468,156 @@ def write_iredes_db(path, design, holes_wanted, outdir, sysver, created, written
         written.update({os.path.normcase(os.path.abspath(f_q)), os.path.normcase(os.path.abspath(f_m))})
     return len(holes)
 
+# ============================================================================ copy to XML delivery folders
+KINDS = {"MWD": ".mwd.xml", "XML": ".quality.xml"}   # delivery subfolder -> file suffix
+
+def hole_id(name):
+    """HoleId from a file name, or None if it isn't an IREDES quality/MWD file.
+    'B1 WICK D v3.quality.3B2740.mwd.xml' -> '3B2740';  '3B2740.quality.xml' -> '3B2740'"""
+    low = name.lower()
+    if low.endswith(".mwd.xml") and ".quality." in low:
+        return name[low.rindex(".quality.") + len(".quality."):-len(".mwd.xml")]
+    if low.endswith(".quality.xml"):
+        return name[:-len(".quality.xml")]
+    return None
+
+
+def kind_of(name):
+    low = name.lower()
+    if low.endswith(".mwd.xml"): return "MWD"
+    if low.endswith(".quality.xml"): return "XML"
+    return None
+
+
+def names_in(folder, recursive):
+    """Lower-cased file names in folder (optionally including subfolders)."""
+    if not os.path.isdir(folder):
+        return set()
+    if recursive:
+        return {f.lower() for _, _, files in os.walk(folder) for f in files}
+    return {f.lower() for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))}
+
+
+def listing(title, items, limit=50):
+    """Log a heading and up to `limit` items."""
+    items = sorted(items)
+    print(f"  {title}: {len(items)}")
+    for i in items[:limit]:
+        print(f"    {i}")
+    if len(items) > limit:
+        print(f"    ... and {len(items) - limit} more")
+
+
+
+def deliver_xml(src, xml_dir, dry_run=False, overwrite=False):
+    """Copy the day's IREDES files to <xml_dir>/MWD and <xml_dir>/XML as hole pairs.
+    Returns (summary text, number of items needing checking)."""
+    dest = {k: os.path.join(xml_dir, k) for k in KINDS}
+    print(f"\n----- Copy to delivery folders{'  (DRY RUN - nothing will be copied)' if dry_run else ''}")
+    for k in KINDS:
+        print(f"To {k:<5} : {dest[k]}")
+        if not os.path.isdir(os.path.join(dest[k], "_archive")):
+            print(f"  WARNING: no _archive folder in {dest[k]}; nothing will count as already delivered")
+    archived = {k: names_in(os.path.join(dest[k], "_archive"), recursive=True) for k in KINDS}
+    present = {k: names_in(dest[k], recursive=False) for k in KINDS}
+
+    # ---- pair up the day's files: (design, HoleId) -> {"MWD": path, "XML": path}
+    pairs, other = {}, []
+    for f in sorted(glob.glob(os.path.join(glob.escape(src), "**", "*.xml"), recursive=True)):
+        name, k = os.path.basename(f), kind_of(os.path.basename(f))
+        hid = hole_id(name)
+        if not k or hid is None:
+            other.append(name); continue
+        design = os.path.basename(os.path.dirname(f))
+        pairs.setdefault((design, hid.lower()), {})[k] = f
+
+    # same delivery file name from two designs would overwrite each other in the flat folders
+    owners = {}
+    for key, p in pairs.items():
+        for k, f in p.items():
+            owners.setdefault((k, os.path.basename(f).lower()), set()).add(key)
+    clash_keys = {key for keys in owners.values() if len(keys) > 1 for key in keys}
+
+    print(f"\nSource: {len(pairs)} holes in {len({d for d, _ in pairs})} design(s)")
+    src_orphans, partly, clashes, done_before, to_copy = [], [], [], [], []
+    for key in sorted(pairs):
+        p = pairs[key]
+        label = f"{key[0]} / {hole_id(os.path.basename(next(iter(p.values()))))}"
+        if len(p) < 2:
+            have = next(iter(p))
+            src_orphans.append(f"{label}: only {KINDS[have]} ({os.path.basename(p[have])}), no {KINDS['MWD' if have == 'XML' else 'XML']}")
+            continue
+        if key in clash_keys:
+            clashes.append(f"{label}: file name also produced by another design"); continue
+        arch = {k: os.path.basename(p[k]).lower() in archived[k] for k in KINDS}
+        if all(arch.values()):
+            done_before.append(label); continue
+        if any(arch.values()):
+            partly.append(f"{label}: " + ", ".join(f"{KINDS[k]} {'in' if arch[k] else 'NOT in'} _archive" for k in KINDS))
+            continue
+        to_copy.append((label, p))
+
+    # ---- copy complete pairs
+    c = {"new": 0, "replaced": 0, "same": 0, "differs": 0}
+    copied_holes, differs = [], []
+    # delivery folder contents after this run: lower-cased name -> name as it appears on disk
+    will_have = {k: {f.lower(): f for f in os.listdir(dest[k]) if os.path.isfile(os.path.join(dest[k], f))} for k in KINDS}
+    for label, p in to_copy:
+        acted = False
+        for k in KINDS:
+            f = p[k]; name = os.path.basename(f); target = os.path.join(dest[k], name)
+            if name.lower() in present[k]:
+                if filecmp.cmp(long_path(f), long_path(target), shallow=False):
+                    c["same"] += 1; continue
+                if not overwrite:
+                    c["differs"] += 1; differs.append(f"{label}: {name}"); continue
+                c["replaced"] += 1
+            else:
+                c["new"] += 1
+            if not dry_run:
+                shutil.copy2(long_path(f), long_path(target))
+            will_have[k][name.lower()] = name; acted = True
+        if acted:
+            copied_holes.append(label)
+
+    verb = "would copy" if dry_run else "copied"
+    print(f"  {verb}: {len(copied_holes)} holes ({c['new']} new files"
+              + (f", {c['replaced']} replaced" if c["replaced"] else "") + ")")
+    print(f"  skipped, already in _archive: {len(done_before)} holes")
+    if c["same"]:
+        print(f"  skipped, identical file already in delivery folder: {c['same']} files")
+    if dry_run and copied_holes:
+        listing("holes that would be copied", copied_holes)
+    if src_orphans: listing("NOT COPIED - orphan in source (only one of the pair)", src_orphans)
+    if partly:      listing("NOT COPIED - only one of the pair is in _archive", partly)
+    if clashes:     listing("NOT COPIED - same file name in two designs", clashes)
+    if differs:     listing("NOT REPLACED - differs from the file already in the delivery folder (use --overwrite)", differs)
+    if other:       listing("Ignored - not a quality/MWD file name", other)
+
+    # ---- orphan check across the delivery folders (as they are now, or would be after copying)
+    ids = {k: {} for k in KINDS}
+    for k in KINDS:
+        for n in will_have[k].values():
+            hid = hole_id(n)
+            if hid is not None and kind_of(n) == k:
+                ids[k][hid.lower()] = n
+    only = {k: sorted(set(ids[k]) - set(ids[o])) for k, o in (("MWD", "XML"), ("XML", "MWD"))}
+    print(f"\nDelivery folders{' (after this run)' if dry_run else ''}: "
+              f"MWD {len(ids['MWD'])} holes, XML {len(ids['XML'])} holes")
+    if not only["MWD"] and not only["XML"]:
+        print("  OK - every hole has both an MWD and a quality file")
+    else:
+        listing("ORPHAN in MWD (no matching quality file in XML)", [ids["MWD"][h] for h in only["MWD"]])
+        listing("ORPHAN in XML (no matching MWD file in MWD)", [ids["XML"][h] for h in only["XML"]])
+
+    problems = len(src_orphans) + len(partly) + len(clashes) + len(only["MWD"]) + len(only["XML"])
+    summary = (f"{verb} {len(copied_holes)} holes, archived {len(done_before)}, "
+                      f"source orphans {len(src_orphans)}, part-archived {len(partly)}, clashes {len(clashes)}, "
+                      f"differs {len(differs)}, delivery orphans MWD {len(only['MWD'])} / XML {len(only['XML'])}")
+    print(f"\n{'WARNING - ' + str(problems) + ' item(s) need checking, see above' if problems else 'No orphans.'}")
+    return summary, problems
+
+
 # ============================================================================ main
 def valid_date(v):
     try:
@@ -503,7 +664,7 @@ class Tee:
     def __getattr__(self, name):
         return getattr(self.stream, name)
 
-RUN = {"root": DEFAULT_ROOT, "date": None, "log_dir": None, "summary": ""}
+RUN = {"root": DEFAULT_ROOT, "date": None, "log_dir": None, "summary": "", "warnings": 0}
 
 def write_logs(buf, status, started, elapsed):
     text = "".join(buf)
@@ -515,8 +676,8 @@ def write_logs(buf, status, started, elapsed):
         except OSError as e:
             print(f"(could not write run log: {e})", file=sys.__stdout__)
     if os.path.isdir(RUN["root"]):
-        last_err = next((l.strip() for l in reversed(text.splitlines()) if l.strip()), "") if status != "OK" else ""
-        line = f"{started:%Y-%m-%d %H:%M:%S}\t{status}\tdate={RUN['date'] or '-'}\t{RUN['summary'] or last_err}\t{getpass_user()}\n"
+        last_err = next((l.strip() for l in reversed(text.splitlines()) if l.strip()), "") if not status.startswith("OK") else ""
+        line = f"{started:%Y-%m-%d %H:%M:%S}\t{status}\tdate={RUN['date'] or '-'}\t{(RUN['summary'] if status.startswith('OK') else last_err) or RUN['summary']}\t{getpass_user()}\n"
         try:
             with open(os.path.join(RUN["root"], "wick_process.log"), "a", encoding="utf-8") as f:
                 f.write(line)
@@ -536,13 +697,13 @@ def run():
     status, code = "OK", 0
     try:
         main()
+        if RUN["warnings"]:
+            status, code = f"OK-WARNINGS({RUN['warnings']})", 2
     except SystemExit as e:
         if e.code not in (None, 0):
             status, code = "FAILED", 1
             if isinstance(e.code, str):
                 print(e.code)
-            else:
-                code = e.code
     except KeyboardInterrupt:
         status, code = "CANCELLED", 1
         print("Cancelled.")
@@ -565,10 +726,18 @@ def main():
     ap.add_argument("--srid", type=int, default=-1, help="EPSG code for the GeoPackage (default -1 undefined)")
     ap.add_argument("--sysver", default="2.0.23201.521", help="EqpSysVer stamped in IREDES headers")
     ap.add_argument("--name", default="wick_asdrilled", help="GeoPackage base name (default wick_asdrilled)")
+    ap.add_argument("--xml", default=DEFAULT_XML, help="XML delivery folder holding MWD\\ and XML\\")
+    ap.add_argument("--no-copy", action="store_true", help="don't copy IREDES files to the delivery folders")
+    ap.add_argument("--copy-dry-run", action="store_true", help="report what would be copied to the delivery folders; copy nothing")
+    ap.add_argument("--overwrite", action="store_true", help="replace delivery-folder files that differ from today's")
     a = ap.parse_args()
     RUN["root"] = a.root
     if not os.path.isdir(a.root):
         sys.exit(f"Raw-data folder not found: {a.root}")
+    if not a.no_copy:
+        for k in KINDS:
+            if not os.path.isdir(os.path.join(a.xml, k)):
+                sys.exit(f"Delivery folder not found: {os.path.join(a.xml, k)}  (use --no-copy to skip the copy step)")
 
     date = a.date or ask_date(a.root)
     RUN["date"] = date
@@ -685,8 +854,17 @@ def main():
     print(f"\n  {len(holes)} holes  ({', '.join(f'{k}: {v}' for k, v in sorted(per_design.items()))})")
     print(f"  CSV + {os.path.basename(gpkg)} + manifest.json -> {out_dir}")
     print(f"  IREDES {n_ired * 2} files -> {ired_dir}")
-    print(f"  Log    -> {os.path.join(a.root, date, 'wick_process.log')}")
     RUN["summary"] = f"{len(holes)} holes, {n_ired * 2} IREDES files, from {', '.join(os.path.basename(p) for p in inputs)}"
+
+    # copy to delivery folders
+    if a.no_copy:
+        print("\n----- Copy to delivery folders skipped (--no-copy)")
+    else:
+        copy_summary, problems = deliver_xml(ired_dir, a.xml, a.copy_dry_run, a.overwrite)
+        RUN["summary"] += f"; {copy_summary}"
+        if problems:
+            RUN["warnings"] = problems
+    print(f"\nLog -> {os.path.join(a.root, date, 'wick_process.log')}")
 
 if __name__ == "__main__":
     run()
