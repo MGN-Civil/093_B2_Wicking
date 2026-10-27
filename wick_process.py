@@ -415,7 +415,7 @@ def safe(name):
 
 
 # ============================================================================ IREDES writer
-def write_iredes_db(path, design, holes_wanted, outdir, sysver, created):
+def write_iredes_db(path, design, holes_wanted, outdir, sysver, created, written):
     """Write IREDES files for the holes in holes_wanted (set of item_id) from one database."""
     tmpdir = None
     open_path = path
@@ -447,10 +447,13 @@ def write_iredes_db(path, design, holes_wanted, outdir, sysver, created):
         hid = safe(h["item_id"])
         channels = chan_by_item.get(h["item_id"], ["PR","DP","PP","FP","RP","FLP","FP_FORWARD","FP_BACK"])
         samples = [(t, d, vals.get(rid, [])) for rid, t, d in recs.get(h["id"], [])]
-        with open(long_path(os.path.join(outdir, f"{hid}.quality.xml")), "w", encoding="utf-8", newline="\n") as f:
+        f_q = os.path.join(outdir, f"{hid}.quality.xml")
+        f_m = os.path.join(outdir, f"{safe(design)}.quality.{hid}.mwd.xml")
+        with open(long_path(f_q), "w", encoding="utf-8", newline="\n") as f:
             f.write(qual_xml(design, h, sysver, created))
-        with open(long_path(os.path.join(outdir, f"{safe(design)}.quality.{hid}.mwd.xml")), "w", encoding="utf-8", newline="\n") as f:
+        with open(long_path(f_m), "w", encoding="utf-8", newline="\n") as f:
             f.write(mwd_xml(design, h, channels, samples, sysver, created))
+        written.update({os.path.normcase(os.path.abspath(f_q)), os.path.normcase(os.path.abspath(f_m))})
     return len(holes)
 
 # ============================================================================ main
@@ -638,15 +641,28 @@ def main():
     write_gpkg(gpkg, holes, depth_log, layers, sources, a.srid)
 
     # IREDES
-    if os.path.isdir(ired_dir):
-        shutil.rmtree(long_path(ired_dir))
     created = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     n_ired = 0
+    written = set()
     for p, k in uniq:
         wanted = src_of.get(safe_relpath(p), set())
         if wanted:
             design = infer_design_name(p)
-            n_ired += write_iredes_db(p, design, wanted, os.path.join(ired_dir, safe(design)), a.sysver, created)
+            n_ired += write_iredes_db(p, design, wanted, os.path.join(ired_dir, safe(design)), a.sysver, created, written)
+    # remove XML left over from an earlier run of this date (files only; folders are left alone
+    # because OneDrive/Explorer often lock them). Failures are reported, not fatal.
+    stale = [f for f in glob.glob(os.path.join(glob.escape(ired_dir), "**", "*.xml"), recursive=True)
+             if os.path.normcase(os.path.abspath(f)) not in written]
+    not_removed = []
+    for f in stale:
+        try:
+            os.remove(long_path(f))
+        except OSError:
+            not_removed.append(f)
+    if stale:
+        print(f"  Removed {len(stale) - len(not_removed)} old IREDES file(s) from an earlier run")
+    if not_removed:
+        print(f"  WARNING: could not remove {len(not_removed)} old IREDES file(s), e.g. {not_removed[0]}")
 
     # manifest
     per_design = {}
