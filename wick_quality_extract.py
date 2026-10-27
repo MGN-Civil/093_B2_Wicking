@@ -16,16 +16,18 @@ Outputs
                sources     non-spatial, one row per source db
 
 Usage
-  python wick_quality_extract.py <folder> [<folder>...] -o <out_basename>
+  python wick_quality_extract.py <folder> [<folder>...]
+                                 [--master <master_dir>] [--date yyyymmdd] [--name wick_asdrilled]
                                  [--csv] [--gpkg] [--srid 28356] [--design-filter "WICK"]
                                  [--skip-empty] [--since 2026-10-13]
-  python wick_quality_extract.py <folder> [<folder>...] --master <master_dir>
-                                 [--date yyyymmdd] [--name wick_asdrilled] [other options]
+  python wick_quality_extract.py <folder> [<folder>...] -o <out_basename> [options]
 
-Master mode (--master) writes everything into <master_dir>/<yyyymmdd>/:
+By default everything is written into <master_dir>/<yyyymmdd>/:
   holes.csv, depth_log.csv, layers.csv, sources.csv, <name>.gpkg, manifest.json
-The date defaults to today on the PC running the script; --date overrides it.
-Re-running on the same day overwrites that day's files.
+<master_dir> defaults to DEFAULT_MASTER (the 093 B2 Paddock Scripts/out folder).
+You are asked for the yyyymmdd folder name (Enter = today) unless --date is given;
+unattended runs use today. Re-running on the same date overwrites that date's files.
+-o writes to <out_basename>_csv/ and <out_basename>.gpkg instead.
 
 If neither --csv nor --gpkg is given, both are written.
 Coordinates are copied as stored (the design's local/site system unless the rig is
@@ -33,6 +35,8 @@ configured to grid). Use --srid to tag the GeoPackage with an EPSG code (default
 undefined cartesian).
 """
 import argparse, csv, json, os, sqlite3, struct, sys, datetime, hashlib, glob, re, tempfile, shutil
+
+DEFAULT_MASTER = r"C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\Scripts\out"
 
 HOLE_COLS = ["id","item_id","time_start","time_end","start_x","start_y","start_z",
              "end_x","end_y","end_z","rotation","operator","machine","hrms","vrms",
@@ -247,6 +251,17 @@ def _write_gpkg(path, holes, depth_log, layers, sources, srid):
     con.commit(); con.close()
 
 # ----------------------------------------------------------------------------- main
+def ask_date():
+    today = datetime.date.today().strftime("%Y%m%d")
+    if not sys.stdin.isatty():
+        return today
+    while True:
+        v = input(f"Folder name (yyyymmdd) [{today}]: ").strip() or today
+        try:
+            datetime.datetime.strptime(v, "%Y%m%d"); return v
+        except ValueError:
+            print("  Please enter a date as yyyymmdd, e.g. 20261027")
+
 def md5(path):
     h = hashlib.md5()
     with open(long_path(path),"rb") as f:
@@ -256,11 +271,11 @@ def md5(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folders", nargs="+", help="folder(s) or .quality.db file(s) to scan")
-    dest = ap.add_mutually_exclusive_group(required=True)
-    dest.add_argument("-o","--out", help="output basename (CSV dir / .gpkg path without extension)")
-    dest.add_argument("--master", help="master folder; outputs go to <master>/<yyyymmdd>/")
-    ap.add_argument("--date", help="yyyymmdd subfolder name for --master (default: today)")
-    ap.add_argument("--name", default="wick_asdrilled", help="GeoPackage base name in --master mode (default wick_asdrilled)")
+    dest = ap.add_mutually_exclusive_group()
+    dest.add_argument("-o","--out", help="output basename (CSV dir / .gpkg path without extension); overrides the master folder")
+    dest.add_argument("--master", help="master folder; outputs go to <master>/<yyyymmdd>/ (default: DEFAULT_MASTER)")
+    ap.add_argument("--date", help="yyyymmdd folder name (prompted for if omitted)")
+    ap.add_argument("--name", default="wick_asdrilled", help="GeoPackage base name in master mode (default wick_asdrilled)")
     ap.add_argument("--csv", action="store_true"); ap.add_argument("--gpkg", action="store_true")
     ap.add_argument("--srid", type=int, default=-1, help="EPSG code for GeoPackage (default -1 undefined)")
     ap.add_argument("--design-filter", help="only databases whose design name contains this text (case-insensitive)")
@@ -269,10 +284,12 @@ def main():
     ap.add_argument("--drop-zero-channels", action="store_true", help="omit depth-log channels that are zero for every record (wick masts log only PP/PR)")
     a = ap.parse_args()
     if not a.csv and not a.gpkg: a.csv = a.gpkg = True
-    if a.master is None and (a.date or a.name != "wick_asdrilled"):
-        ap.error("--date and --name only apply with --master")
+    if a.out and (a.date or a.name != "wick_asdrilled"):
+        ap.error("--date and --name don't apply with -o")
+    if not a.out:
+        a.master = a.master or DEFAULT_MASTER
     if a.master:
-        date = a.date or datetime.date.today().strftime("%Y%m%d")
+        date = a.date or ask_date()
         try:
             datetime.datetime.strptime(date, "%Y%m%d")
         except ValueError:
