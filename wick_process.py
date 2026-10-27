@@ -5,12 +5,13 @@ wick_process.py - Daily processing of Trimble Groundworks *.quality.db as-drille
 Asks for a date (yyyymmdd), finds that day's raw data under the _from_Machine folder,
 and writes everything to one place:
 
-  <root>\<yyyymmdd>\outputs\
+  <root>\<yyyymmdd>\
+    wick_process.log           full output of every run for this date (appended)
+    outputs\
       holes.csv, depth_log.csv, layers.csv, sources.csv
       wick_asdrilled.gpkg      holes (PointZ collar), hole_axes (LineStringZ collar->toe),
                                depth_log, layers, sources
       manifest.json            what was read, options used, counts
-      wick_process.log         full output of every run for this date (appended)
       iredes\<design>\
           <HoleId>.quality.xml                DRPQual  (hole quality record)
           <design>.quality.<HoleId>.mwd.xml   DRMWD    (measure-while-drilling log)
@@ -502,14 +503,14 @@ class Tee:
     def __getattr__(self, name):
         return getattr(self.stream, name)
 
-RUN = {"root": DEFAULT_ROOT, "date": None, "out_dir": None, "summary": ""}
+RUN = {"root": DEFAULT_ROOT, "date": None, "log_dir": None, "summary": ""}
 
 def write_logs(buf, status, started, elapsed):
     text = "".join(buf)
     header = f"===== {started:%Y-%m-%d %H:%M:%S}  {status}  ({elapsed:.1f} s)  {' '.join(sys.argv[1:])}\n"
-    if RUN["out_dir"] and os.path.isdir(RUN["out_dir"]):
+    if RUN["log_dir"] and os.path.isdir(RUN["log_dir"]):
         try:
-            with open(os.path.join(RUN["out_dir"], "wick_process.log"), "a", encoding="utf-8") as f:
+            with open(os.path.join(RUN["log_dir"], "wick_process.log"), "a", encoding="utf-8") as f:
                 f.write(header + text + ("" if text.endswith("\n") else "\n") + "\n")
         except OSError as e:
             print(f"(could not write run log: {e})", file=sys.__stdout__)
@@ -578,7 +579,7 @@ def main():
         sys.exit(f"No folder containing '{date}' with *.quality.db files in {a.root}")
     design_filter = None if a.all_designs else a.design_filter
     out_dir = os.path.join(a.root, date, "outputs")
-    RUN["out_dir"] = out_dir
+    RUN["log_dir"] = os.path.join(a.root, date)
     print(f"Date     : {date}")
     ired_dir = os.path.join(out_dir, "iredes")
     print(f"Raw data : {', '.join(os.path.basename(p) for p in inputs)}")
@@ -684,7 +685,7 @@ def main():
     print(f"\n  {len(holes)} holes  ({', '.join(f'{k}: {v}' for k, v in sorted(per_design.items()))})")
     print(f"  CSV + {os.path.basename(gpkg)} + manifest.json -> {out_dir}")
     print(f"  IREDES {n_ired * 2} files -> {ired_dir}")
-    print(f"  Log    -> {os.path.join(out_dir, 'wick_process.log')}")
+    print(f"  Log    -> {os.path.join(a.root, date, 'wick_process.log')}")
     RUN["summary"] = f"{len(holes)} holes, {n_ired * 2} IREDES files, from {', '.join(os.path.basename(p) for p in inputs)}"
 
 if __name__ == "__main__":
