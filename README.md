@@ -43,9 +43,11 @@ A run that fails before it finds any data (e.g. no folder for that date) only ap
 | `*.mwd.xml` | `Data\XML\MWD\` |
 | `*.quality.xml` | `Data\XML\XML\` |
 
-- A file is **skipped** if a file with the same name is anywhere in that folder's `_archive` (subfolders included, case-insensitive), so already-delivered holes are not sent again.
-- A file already in the delivery folder is left alone if identical. If it differs it is reported and not replaced unless `--overwrite` is given.
-- The same file name coming from two designs is reported and not copied, since the delivery folders are flat.
+- Files are handled **per hole, as a pair**: a hole's `.quality.xml` and `.mwd.xml` (matched on the HoleId in the file names) are copied together or not at all.
+- A hole is **skipped** if both files are anywhere in the folders' `_archive` (subfolders included, case-insensitive), so already-delivered holes are not sent again.
+- **Not copied, and listed** for checking: a hole with only one of the two files in the day's output (source orphan); a hole with only one of the two in `_archive`; the same file name coming from two designs.
+- A file already in the delivery folder is left alone if identical. If it differs it is listed and not replaced unless `--overwrite` is given.
+- **Orphan check**: after copying, the `MWD` and `XML` delivery folders are compared by HoleId and any file without its partner is listed. The run ends with `No orphans.` or a warning with the number of items to check.
 - Both delivery folders must exist; nothing is copied if either is missing.
 - `--dry-run` lists what would be copied without copying. The batch file offers a dry run first and then asks before copying.
 - Each run is appended to `_from_Machine\<yyyymmdd>\wick_copy_xml.log`.
