@@ -1,92 +1,84 @@
-# 093 B2 Wicking – Groundworks quality.db tools
+# 093 B2 Wicking – Groundworks quality.db processing
 
-Two Python scripts for getting as-drilled wick data out of Trimble Groundworks `*.quality.db` files (for example a WorksManager export) on project 093 B2 Wicking. `wick_quality_extract.py` merges every database into CSV and/or a GeoPackage for review in Excel or QGIS. `wick_quality_to_iredes.py` rebuilds the per-hole IREDES XML files Groundworks itself exports, for systems that take IREDES. Both run on any PC with Python 3.8+ and need no extra packages.
+One Python script, `wick_process.py`, turns a day's Trimble Groundworks `*.quality.db` files (a WorksManager export) into everything needed for project 093 B2 Wicking: CSVs and a GeoPackage for Excel/QGIS, plus the per-hole IREDES XML files Groundworks itself exports. `run_wick.bat` runs it with a double-click. Runs on any PC with Python 3.8+; no extra packages.
 
-## Features
+## Daily use
 
-| Area | `wick_quality_extract.py` | `wick_quality_to_iredes.py` |
+1. Put the day's export in `...\Wicking\Data\_from_Machine\` (any folder whose name contains the date, e.g. `Export.20261027_111309` or `20261027`).
+2. Double-click `run_wick.bat`.
+3. Enter the date as `yyyymmdd` (Enter = today). If no folder for that date exists, it says so and lists the dates it can see.
+
+Everything is written to `_from_Machine\<yyyymmdd>\outputs\`:
+
+```
+_from_Machine\
+  Export.20261027_111309\        raw data (any folder name containing the date)
+  20261027\
+    outputs\
+      holes.csv  depth_log.csv  layers.csv  sources.csv
+      wick_asdrilled.gpkg        holes (PointZ collar), hole_axes (LineStringZ), depth_log, layers, sources
+      manifest.json              inputs, options, holes per design, latest time_end, counts
+      iredes\
+        B1 WICK D v3\
+          <HoleId>.quality.xml               DRPQual
+          B1 WICK D v3.quality.<HoleId>.mwd.xml  DRMWD
+```
+
+Running the same date again rewrites that date's outputs.
+
+## Options
+
+Pass them after the batch file or script, e.g. `run_wick.bat --all-designs`.
+
+| Option | Default | Meaning |
 |---|---|---|
-| Purpose | Analysis and GIS | Data exchange (IREDES V1.0) |
-| Output | `holes.csv`, `depth_log.csv`, `layers.csv`, `sources.csv` and/or one `.gpkg` (`holes` PointZ, `hole_axes` LineStringZ, `depth_log`, `layers`, `sources`) | Per hole: `<HoleId>.quality.xml` (DRPQual) and `<design>.quality.<HoleId>.mwd.xml` (DRMWD) |
-| Shape | All databases merged into one dataset | One folder per design (or `--flat`) |
-| Tables read | `General`, `Hole`, `Hole_DepthRecording`, `Hole_DepthRecord`, `Hole_DepthRecordValue`, `Layer` | `Hole` and the depth-recording tables |
-| Derived fields | `depth_m`, `plan_offset_m`, `duration_s` | – |
-| Depth log | Every channel, long format | First 6 channels named, the rest as empty `<Parameter />` slots |
-| Duplicates | Skips identical files (MD5 + design); keeps latest `time_end` per hole | Skips files already written, so re-runs are incremental |
+| `--date yyyymmdd` | prompt | Skip the prompt. Unattended runs (no console) use today. |
+| `--root <folder>` | `C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\_from_Machine` | Raw-data folder (`DEFAULT_ROOT` at the top of the script). |
+| `--design-filter <text>` | `WICK` | Only designs whose name contains this text. |
+| `--all-designs` | off | Process every design (PREDRILL etc.). |
+| `--since <ISO date>` | none | Only holes with `time_end >=` this, e.g. `2026-10-13`. |
+| `--keep-zero-channels` | off | Keep depth-log channels that are zero throughout (normally dropped; wick masts log only PP/PR). |
+| `--srid <EPSG>` | −1 | Tag the GeoPackage with a coordinate system. Coordinates are the design's local site system, so leave at −1 unless the rig writes grid coordinates. |
+| `--sysver` | `2.0.23201.521` | `EqpSysVer` in IREDES headers. |
+| `--name` | `wick_asdrilled` | GeoPackage file name. |
 
 ## How it works / business rules
 
-- **Design name** is taken from the file name: `B1 WICK A v3.B1 WICK A v3.985E0EDB.quality.db` → `B1 WICK A v3`.
-- **`--since`** keeps holes with `time_end >=` the given ISO timestamp (text comparison, so use `YYYY-MM-DD`).
-- **`--design-filter`** keeps databases whose design name contains the text (case-insensitive).
-- **Extract**
-  - Writes into `<master>\<yyyymmdd>\`: the four CSVs, `<name>.gpkg` (default `wick_asdrilled`, change with `--name`) and `manifest.json` (run time, inputs, options, holes per design, latest `time_end`, row counts, source files). `--master` defaults to `C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\Scripts\out` (`DEFAULT_MASTER` at the top of the script). The script asks for the `yyyymmdd` folder name (Enter = today) unless `--date` is given; unattended runs use today. Re-running on the same date overwrites that date's files. `-o` writes to `<out>_csv\` and `<out>.gpkg` instead.
-  - `depth_m = start_z − end_z` (vertical depth, not along-hole length).
-  - `--drop-zero-channels` removes depth-log channels that are zero for every record (wick masts log only PP/PR). Applied across all designs together.
-  - Coordinates are copied as stored. `--srid` tags the GeoPackage with an EPSG code (default −1, undefined). Use the code for the coordinate system the design is in.
+- **Inputs**: every folder directly under the root whose name contains the date is searched recursively for `*.quality.db`. Identical files (same MD5 and design) are read once.
+- **Design name** comes from the file name: `B1 WICK A v3.B1 WICK A v3.985E0EDB.quality.db` → `B1 WICK A v3`.
+- **Duplicate holes**: a hole in more than one database is kept once, from the copy with the latest `time_end`; its depth log, layers and IREDES files all come from that copy.
+- `depth_m = start_z − end_z` (vertical depth). `plan_offset_m` is collar-to-toe horizontal drift. `duration_s` from start/end times.
 - **IREDES**
-  - Output goes to `<master>\<yyyymmdd>\iredes\`. `--master` defaults to `C:\Users\GregLauer\OneDrive - mgncivil.com.au\Projects\093 B2 Paddock\Wicking\Data\Scripts\out` (`DEFAULT_MASTER` at the top of the script). The script asks for the `yyyymmdd` folder name (Enter = today) unless `--date` is given; when run unattended (no console input) it uses today. `-o <dir>` writes straight to that folder instead.
   - `Hstatus` = `OK` when `Hole.completed = 1`, otherwise `Fail`; `interruptedItem` is the inverse.
-  - Channel units: PR m/min; DP, PP, FP, RP, FLP Bar.
-  - Fixed values: identity transform matrix, `CsysType L`, `TypeOfHole EasersHole`, `DrillingMethod: COPROD`, `SampleDistance 1.0`, `EqpSysVer` from `--sysver` (default `2.0.23201.521`).
+  - Channel units: PR m/min; DP, PP, FP, RP, FLP Bar. The first six channels are named, the rest are empty `<Parameter />` slots.
+  - Fixed values: identity transform matrix, `CsysType L`, `TypeOfHole EasersHole`, `DrillingMethod: COPROD`, `SampleDistance 1.0`.
   - `DrillBitDia` assumes `Hole.diameter` is in metres and writes millimetres.
   - `ChkSum` is a CRC32 of the file before `<IR:GenTrailer>`, **not** Groundworks' own algorithm. Consumers that validate it will reject the files.
+- Windows paths over 260 characters (deep OneDrive export folders) are handled.
 
 ## Expected inputs
 
-Trimble Groundworks `*.quality.db` SQLite files, passed as files or folders (folders are searched recursively). Required: a `Hole` table with `id, item_id, time_start, time_end, start_x/y/z, end_x/y/z, operator, machine, hrms, vrms, note, completed, diameter`. Depth logs need `Hole_DepthRecording (item_id, columns)`, `Hole_DepthRecord (id, owner_id, time, depth)` and `Hole_DepthRecordValue (depthRecord_id, value)`. Databases are opened read-only.
+Trimble Groundworks `*.quality.db` SQLite files, opened read-only. Required: a `Hole` table with `id, item_id, time_start, time_end, start_x/y/z, end_x/y/z, operator, machine, hrms, vrms, note, completed, diameter`. Depth logs need `Hole_DepthRecording (item_id, columns)`, `Hole_DepthRecord (id, owner_id, time, depth)` and `Hole_DepthRecordValue (depthRecord_id, value)`.
 
-## Running
+## Updating
 
-```bash
-# Daily run into Scripts\out\<yyyymmdd>\ (prompts for the date)
-python wick_quality_extract.py "D:\WorksManager\Export" --design-filter WICK --drop-zero-channels
-
-# Back-file an older export under its own date, no prompt
-python wick_quality_extract.py "D:\Exports\2026-10-19" --date 20261019 --design-filter WICK
-
-# CSV + GeoPackage, wick designs only, since 13 Oct, tagged MGA2020 zone 56
-python wick_quality_extract.py "D:\WorksManager\Export" -o out\b2_wicks --design-filter WICK --since 2026-10-13 --srid 7856 --drop-zero-channels
-
-# CSV only
-python wick_quality_extract.py "D:\WorksManager\Export" -o out\b2_wicks --csv
-
-# IREDES XML into Scripts\out\<yyyymmdd>\iredes\ (prompts for the date; re-runs only add new holes)
-python wick_quality_to_iredes.py "D:\WorksManager\Export" --design-filter WICK
-
-# Same, without the prompt
-python wick_quality_to_iredes.py "D:\WorksManager\Export" --design-filter WICK --date 20261027
-
-# Rebuild specific holes
-python wick_quality_to_iredes.py "D:\WorksManager\Export" -o out\iredes --hole 3B2740 3B2741 --overwrite
-```
-
-No deployment needed; copy the scripts to the PC that has the export.
+Double-click `git_pull.bat` in the scripts folder to get the latest version from GitHub.
 
 ## Known issues
 
-**Extract**
-- A hole found in two different databases is deduplicated, but its depth-log rows from both are kept, so its log appears twice.
+- IREDES writing crashes on NULL `operator`, `machine`, `hrms`, `vrms`, coordinates or depth-log values.
+- IREDES files always list all six channels even though wick masts log only PP/PR.
 - Empty CSVs are written with no header row.
 - The GeoPackage has no spatial index or `gpkg_extensions` table; fine for QGIS, slow for very large sets.
 
-**IREDES**
-- Crashes on NULL `operator`, `machine`, `hrms`, `vrms`, coordinates or depth-log values.
-- When the same hole is in two databases, the first one by path wins (or the last with `--overwrite`), not the newest.
-- File create/close dates are the run time, so `--overwrite` changes them on every rerun.
-- Wick masts log only PP/PR, but all six channels are written.
-
-**Both**
-- Windows paths over 260 characters (deep OneDrive export folders) and databases on a different drive from the working directory are handled by both scripts.
-
 ## Data & privacy
 
-No project data is in this repo. Input databases and all outputs stay on the machine where the scripts run. Note that outputs include operator names from `Hole.operator`.
+No project data is in this repo. Input databases and all outputs stay on the machine where the script runs. Outputs include operator names from `Hole.operator`.
 
 ## Dependencies
 
-Python 3.8+ standard library only (`sqlite3`, `csv`, `struct`, `zlib`, `xml.sax.saxutils`). Optional: `pyproj`, used by the extract script to write full WKT for `--srid`; without it a placeholder definition is written and QGIS resolves the EPSG code.
+Python 3.8+ standard library only. Optional: `pyproj`, used to write full WKT for `--srid`; without it a placeholder is written and QGIS resolves the EPSG code.
 
 ## Platform support
 
-Windows, macOS and Linux.
+Windows (primary), macOS and Linux.
