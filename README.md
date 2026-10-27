@@ -34,6 +34,24 @@ Running the same date again rewrites that date's outputs.
 
 A run that fails before it finds any data (e.g. no folder for that date) only appears in the history log.
 
+## Copying XML to the delivery folders (testing)
+
+`wick_copy_xml.py` (double-click `run_copy_xml.bat`) copies a date's IREDES files from `_from_Machine\<yyyymmdd>\outputs\iredes\` into the delivery folders, without the design subfolders:
+
+| Files | Copied to |
+|---|---|
+| `*.mwd.xml` | `Data\XML\MWD\` |
+| `*.quality.xml` | `Data\XML\XML\` |
+
+- A file is **skipped** if a file with the same name is anywhere in that folder's `_archive` (subfolders included, case-insensitive), so already-delivered holes are not sent again.
+- A file already in the delivery folder is left alone if identical. If it differs it is reported and not replaced unless `--overwrite` is given.
+- The same file name coming from two designs is reported and not copied, since the delivery folders are flat.
+- Both delivery folders must exist; nothing is copied if either is missing.
+- `--dry-run` lists what would be copied without copying. The batch file offers a dry run first and then asks before copying.
+- Each run is appended to `_from_Machine\<yyyymmdd>\wick_copy_xml.log`.
+
+Defaults (`DEFAULT_ROOT`, `DEFAULT_XML` at the top of the script) can be changed with `--root` and `--xml`.
+
 ## Options
 
 Pass them after the batch file or script, e.g. `run_wick.bat --all-designs`.
